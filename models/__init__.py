@@ -1,13 +1,6 @@
 # models/__init__.py
 """
 Model package for Adaptive English Learning Coach.
-Includes modules for:
-- adaptive_engine: DKT adaptive learning model
-- chatbot_service: Gemini/Gemma conversational tutor
-- grammar_checker: fine-tuned T5 grammar correction
-- emotion_service: FER2013 emotion detector
-- speech_to_text: Whisper transcription
-- text_to_speech_service: gTTS text-to-speech
 """
 
 from . import adaptive_engine

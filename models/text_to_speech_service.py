@@ -1,16 +1,21 @@
+# models/text_to_speech_service.py
 import os
-from gtts import gTTS
 import uuid
+from gtts import gTTS
 
-DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "tts_cache")
-os.makedirs(DATA_DIR, exist_ok=True)
+CACHE_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)),
+    "data",
+    "tts_cache"
+)
+os.makedirs(CACHE_DIR, exist_ok=True)
 
 def synthesize_tts(text: str, lang: str = "en"):
     """
-    Generate TTS mp3 and return the absolute file path.
+    Generate mp3 file and return full path.
     """
     tts = gTTS(text=text, lang=lang, slow=False)
     filename = f"tts_{uuid.uuid4().hex}.mp3"
-    out_path = os.path.join(DATA_DIR, filename)
+    out_path = os.path.join(CACHE_DIR, filename)
     tts.save(out_path)
     return out_path

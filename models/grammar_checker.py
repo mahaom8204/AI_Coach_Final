@@ -1,7 +1,8 @@
+# models/grammar_checker.py
+import os
 import torch
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 from difflib import ndiff
-import os
 
 CHECKPOINT_PATH = os.path.join(
     os.path.dirname(os.path.dirname(__file__)),
@@ -15,7 +16,7 @@ _tokenizer = None
 _model = None
 _device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-def load_gec():
+def _load_gec():
     global _tokenizer, _model
     if _tokenizer is None:
         _tokenizer = AutoTokenizer.from_pretrained(CHECKPOINT_PATH)
@@ -24,7 +25,7 @@ def load_gec():
         _model.eval()
 
 def correct_sentence(sentence: str) -> str:
-    load_gec()
+    _load_gec()
     inputs = _tokenizer(
         sentence,
         return_tensors="pt",
@@ -38,6 +39,7 @@ def correct_sentence(sentence: str) -> str:
         num_beams=4,
         early_stopping=True
     )
+
     corrected = _tokenizer.decode(outputs[0], skip_special_tokens=True)
     return corrected
 
@@ -46,9 +48,9 @@ def highlight_corrections(original: str, corrected: str) -> str:
     highlighted = []
     for token in diff:
         if token.startswith("- "):
-            highlighted.append(f"[{token[2:]}]")  # removed
+            highlighted.append(f"[{token[2:]}]")
         elif token.startswith("+ "):
-            highlighted.append(f"({token[2:]})")  # added
+            highlighted.append(f"({token[2:]})")
         elif token.startswith("  "):
             highlighted.append(token[2:])
     return " ".join(highlighted)

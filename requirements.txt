@@ -12,4 +12,5 @@ opencv-python
 gtts
 soundfile
 openai-whisper
-scikit-learn
+pydub
+ffmpeg-python

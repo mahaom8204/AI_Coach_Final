@@ -1,7 +1,9 @@
+# utils/roadmap_loader.py
 import os
 import json
+import pandas as pd
 
-def load_roadmap():
+def load_roadmap_dict():
     data_path = os.path.join(
         os.path.dirname(os.path.dirname(__file__)),
         "data",
@@ -11,15 +13,16 @@ def load_roadmap():
         return json.load(f)["English_Learning_Roadmap"]
 
 def flatten_roadmap():
-    rm = load_roadmap()
-    flat = []
-    for level, info in rm.items():
-        for key, val in info.items():
-            if isinstance(val, dict) and "Description" in val:
-                flat.append({
-                    "level": level,
-                    "title": key,
-                    "desc": val["Description"],
-                    "examples": val.get("Example", [])
+    rm = load_roadmap_dict()
+    topics = []
+    for level_name, items in rm.items():
+        for key, value in items.items():
+            # keys like "1. Fundamentals": {Description: ..., Example: [...]}
+            if isinstance(value, dict) and "Description" in value:
+                topics.append({
+                    "topic": key.replace("1.", "").replace("2.", "").strip(),
+                    "roadmap_level": level_name,
+                    "description": value["Description"],
+                    "examples": value.get("Example", [])
                 })
-    return flat
+    return pd.DataFrame(topics)
