@@ -1,0 +1,15 @@
+streamlit
+python-dotenv
+google-genai
+torch
+transformers
+tensorflow
+keras
+joblib
+pandas
+numpy
+opencv-python
+gtts
+soundfile
+openai-whisper
+scikit-learn

@@ -1,0 +1,34 @@
+{
+  "questions": [
+    {
+      "question": "Choose the correct form: She ____ to school every day.",
+      "options": [
+        "go",
+        "goes",
+        "going",
+        "gone"
+      ],
+      "answer": "goes"
+    },
+    {
+      "question": "Identify the correct sentence:",
+      "options": [
+        "He do his homework.",
+        "He does his homework.",
+        "He doing his homework.",
+        "He done his homework."
+      ],
+      "answer": "He does his homework."
+    },
+    {
+      "question": "What is the plural of 'child'?",
+      "options": [
+        "childs",
+        "children",
+        "childes",
+        "childer"
+      ],
+      "answer": "children"
+    }
+  ]
+}
