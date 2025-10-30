@@ -1,9 +1,9 @@
-# models/speech_to_text.py
+import io
+import sounddevice as sd
+import soundfile as sf
+import numpy as np
 import torch
 import whisper
-import tempfile
-import numpy as np
-import soundfile as sf
 
 _device = "cuda" if torch.cuda.is_available() else "cpu"
 _whisper_model = None
@@ -11,27 +11,35 @@ _whisper_model = None
 def _load_whisper():
     global _whisper_model
     if _whisper_model is None:
-        # "small" for multilingual accuracy
         _whisper_model = whisper.load_model("small", device=_device)
 
+def record_audio(seconds: int = 5, samplerate: int = 16000):
+    """
+    Record from system default microphone.
+    Returns raw WAV bytes.
+    """
+    st_audio = sd.rec(
+        int(seconds * samplerate),
+        samplerate=samplerate,
+        channels=1,
+        dtype="float32"
+    )
+    sd.wait()
+    # write to in-memory wav
+    buf = io.BytesIO()
+    sf.write(buf, st_audio, samplerate, format="WAV")
+    return buf.getvalue()
+
 def transcribe_file(file_bytes: bytes, language_code: str = "en"):
-    """
-    file_bytes: audio bytes in WAV format (mono float32 or int16 is fine)
-    We'll write to temp, load with soundfile, run inference.
-    """
     _load_whisper()
 
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-        tmp.write(file_bytes)
-        tmp_path = tmp.name
-
-    audio, sr = sf.read(tmp_path)
-    if audio.ndim > 1:
-        audio = np.mean(audio, axis=1)
-    audio = audio.astype(np.float32)
+    # read from bytes into float32 mono
+    data, sr = sf.read(io.BytesIO(file_bytes), dtype="float32")
+    if data.ndim > 1:
+        data = np.mean(data, axis=1)
 
     result = _whisper_model.transcribe(
-        audio,
+        data,
         language=language_code,
         task="transcribe",
         fp16=False

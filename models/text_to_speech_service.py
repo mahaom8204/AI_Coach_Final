@@ -1,4 +1,3 @@
-# models/text_to_speech_service.py
 import os
 import uuid
 from gtts import gTTS
@@ -12,7 +11,7 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 
 def synthesize_tts(text: str, lang: str = "en"):
     """
-    Generate mp3 file and return full path.
+    lang can be "en", "hi", "mr"
     """
     tts = gTTS(text=text, lang=lang, slow=False)
     filename = f"tts_{uuid.uuid4().hex}.mp3"

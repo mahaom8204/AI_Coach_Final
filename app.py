@@ -1,282 +1,199 @@
 # app.py
-import io
-import base64
-import cv2
-import numpy as np
 import streamlit as st
-import streamlit.components.v1 as components
-from pydub import AudioSegment
+from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, WebRtcMode
+import av, cv2
 
-from utils.session_state import init_state
+from utils.session_state import init_state, save_game_state
 from models.chatbot_service import TutorBot
 from models import adaptive_engine
 from models.emotion_service import predict_emotion_from_frame
 from models.grammar_checker import correct_sentence, highlight_corrections
-from models.speech_to_text import transcribe_file
+from models.speech_to_text import record_audio, transcribe_file
 from models.text_to_speech_service import synthesize_tts
 
-
-st.set_page_config(
-    page_title="Adaptive English Coach",
-    layout="wide",
-    page_icon="🧠",
-)
-
+st.set_page_config(page_title="Adaptive English Coach", page_icon="🧠", layout="wide")
 init_state(st)
 
-# lazy init chatbot instance
+# Tutor singleton
 if st.session_state.tutorbot is None:
     st.session_state.tutorbot = TutorBot()
 
-# helper function: browser mic recorder widget
-def mic_recorder_ui():
-    html_code = """
-    <script>
-    let chunks = [];
-    let mediaRecorder;
-    let isRecording = false;
+# ===== Live Emotion (auto-playing) =====
+class EmotionTransformer(VideoTransformerBase):
+    def __init__(self):
+        self.last_emotion = None
+    def transform(self, frame: av.VideoFrame):
+        img = frame.to_ndarray(format="bgr24")
+        label, box = predict_emotion_from_frame(img)
+        if label:
+            self.last_emotion = label
+            if box:
+                x,y,w,h = box
+                cv2.rectangle(img, (x,y), (x+w,y+h), (0,180,0), 2)
+            cv2.putText(img, label, (10,30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,200,0), 2, cv2.LINE_AA)
+        return img
 
-    async function startRec(){
-        chunks = [];
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        mediaRecorder = new MediaRecorder(stream);
-        mediaRecorder.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
-        mediaRecorder.onstop = e => {
-            const blob = new Blob(chunks, { type: 'audio/webm' });
-            const reader = new FileReader();
-            reader.onloadend = () => {
-                const base64data = reader.result.split(',')[1];
-                const pyInput = document.getElementById("audio_data");
-                pyInput.value = base64data;
-            };
-            reader.readAsDataURL(blob);
-        };
-        mediaRecorder.start();
-        isRecording = true;
-        document.getElementById("status").innerText = "Recording...";
-    }
+# Try to start automatically (user will still need to allow camera once)
+ctx = webrtc_streamer(
+    key="emotion",
+    mode=WebRtcMode.SENDRECV,
+    desired_playing_state=True,             # <-- auto-start
+    media_stream_constraints={"video": True, "audio": False},
+    video_transformer_factory=EmotionTransformer,
+    async_processing=True,
+    video_html_attrs={"autoPlay": True, "muted": True, "playsInline": True}
+)
 
-    function stopRec(){
-        if (isRecording){
-            mediaRecorder.stop();
-            isRecording = false;
-            document.getElementById("status").innerText = "Stopped. Click 'Process Speech' below.";
-        }
-    }
-    </script>
+def get_live_emotion():
+    if ctx and ctx.video_transformer and ctx.video_transformer.last_emotion:
+        st.session_state.current_emotion = ctx.video_transformer.last_emotion
+    return st.session_state.current_emotion
 
-    <div>
-      <p id="status">Idle</p>
-      <button onclick="startRec()">Start Recording</button>
-      <button onclick="stopRec()">Stop Recording</button>
-      <input type="hidden" id="audio_data" name="audio_data" />
-    </div>
-    """
-    components.html(html_code, height=200)
+# ===== Helpers =====
+def update_gamification(correct, total):
+    gs = st.session_state.game_state
+    gs["xp"] += int(correct) * 10
+    if total > 0 and (correct/total) >= 0.6:
+        gs["streak_days"] += 1
+    # sync "You" in leaderboard
+    you = next((p for p in gs["leaderboard"] if p["name"].lower()=="you"), None)
+    if you: you["xp"] = gs["xp"]
+    else: gs["leaderboard"].append({"name":"You","xp":gs["xp"]})
+    save_game_state(gs)
 
-# tabs
-tabs = st.tabs([
-    "Assessment",
-    "Learning Path",
-    "Chat Tutor",
-    "Speak & Practice",
-    "Grammar Checker",
-])
+def generate_quiz_now():
+    info = adaptive_engine.get_topic_info(
+        current_topic=st.session_state.current_topic,
+        user_results=st.session_state.user_results,
+        emotion=get_live_emotion()
+    )
+    diff = info["base_difficulty"]
+    q = st.session_state.tutorbot.generate_quiz(
+        topic=st.session_state.current_topic,
+        difficulty_hint=diff,
+        num_q=5
+    )
+    st.session_state.quiz_data = q
+    st.session_state.quiz_answers = [None]*len(q)
+    return info
 
-########################################
-# TAB 1: ASSESSMENT (LLM quiz + emotion + adaptivity)
-########################################
+def refresh_teaching_block():
+    info = adaptive_engine.get_topic_info(
+        current_topic=st.session_state.current_topic,
+        user_results=st.session_state.user_results,
+        emotion=get_live_emotion()
+    )
+    st.session_state.teaching_block = st.session_state.tutorbot.generate_teaching_block(
+        topic=st.session_state.current_topic,
+        mood=st.session_state.current_emotion,
+        level_hint=info["model_level"],
+    )
+
+# ===== Sidebar =====
+with st.sidebar:
+    gs = st.session_state.game_state
+    st.metric("Streak (days)", gs["streak_days"])
+    st.metric("XP", gs["xp"])
+    st.caption(f"Emotion: {get_live_emotion() or '—'}")
+
+# ===== Tabs =====
+tabs = st.tabs(["📘 Learn", "📝 Assessment", "💬 Chat", "🎙 Speak", "🛠 Grammar", "🌐 Translate"])
+
+# --- Learn ---
 with tabs[0]:
-    st.header("Quick Assessment")
+    st.subheader(f"Current Topic • {st.session_state.current_topic} (starts A1)")
+    col1, col2 = st.columns([3,1])
+    with col1:
+        if st.button("Load/Refresh Lesson", use_container_width=True):
+            refresh_teaching_block()
+        st.write(st.session_state.teaching_block or "Click to load lesson content.")
+    with col2:
+        st.write("Live Emotion:", get_live_emotion() or "Detecting…")
 
-    col_left, col_right = st.columns([2,1])
-
-    with col_left:
-        st.subheader("1. Answer these questions")
-
-        # generate quiz if not already
-        if st.session_state.quiz_data is None:
-            # choose a topic prompt you want to test (can be dynamic later)
-            quiz_topic = "basic English grammar, tense correctness, and sentence choice"
-            st.session_state.quiz_data = st.session_state.tutorbot.generate_quiz(
-                topic=quiz_topic,
-                num_q=5
-            )
-            st.session_state.quiz_answers = [None] * len(st.session_state.quiz_data)
-
-        # render each question
+# --- Assessment (auto new quiz always) ---
+with tabs[1]:
+    st.subheader("Adaptive Quiz (emotion-aware)")
+    if st.session_state.quiz_data is None:
+        generate_quiz_now()
+    if st.session_state.quiz_data:
         for i, q in enumerate(st.session_state.quiz_data):
             st.markdown(f"**Q{i+1}. {q['question']}**")
-            # show options as "1. text", "2. text", etc.
-            options_labels = [f"{idx+1}. {opt}" for idx, opt in enumerate(q["options"])]
-            current_val = st.session_state.quiz_answers[i]
+            opts = [f"{j+1}. {opt}" for j, opt in enumerate(q["options"])]
+            cur = st.session_state.quiz_answers[i]
             st.session_state.quiz_answers[i] = st.radio(
-                "Choose one:",
-                options=options_labels,
-                index=options_labels.index(current_val) if current_val in options_labels else 0,
-                key=f"quiz_q_{i}"
+                "Choose one:", opts,
+                index=(opts.index(cur) if cur in opts else 0),
+                key=f"q_{i}"
             )
+            st.divider()
 
-        if st.button("Submit Answers"):
-            results = []
-            for i, q in enumerate(st.session_state.quiz_data):
-                chosen_label = st.session_state.quiz_answers[i]
-                chosen_idx = int(chosen_label.split(".")[0]) - 1
-                correct_flag = 1 if chosen_idx == q["answer_index"] else 0
-                results.append(correct_flag)
+    # Submit always regenerates a new quiz (right OR wrong)
+    if st.button("Submit & Next Quiz", use_container_width=True):
+        total = len(st.session_state.quiz_data or [])
+        correct = 0
+        res = []
+        for i, q in enumerate(st.session_state.quiz_data or []):
+            sel = st.session_state.quiz_answers[i]
+            idx = int(sel.split(".")[0]) - 1
+            ok = 1 if idx == q["answer_index"] else 0
+            res.append(ok); correct += ok
+        st.session_state.user_results = res
+        update_gamification(correct, total)
+        info = generate_quiz_now()      # ← ALWAYS regenerate
+        refresh_teaching_block()        # refresh learn content
+        st.success(f"Round score: {correct}/{total}")
+        st.info(info["coach_message"])
 
-            st.session_state.user_results = results
-            score = sum(results)
-            total = len(results)
-
-            st.success(f"Your score: {score} / {total}")
-
-    with col_right:
-        st.subheader("2. Update Mood")
-        st.caption("Take a quick snapshot so we can adapt pacing & tone.")
-
-        img_data = st.camera_input("Tap 'Take Photo' to detect mood")
-        if img_data is not None:
-            file_bytes = np.asarray(bytearray(img_data.getvalue()), dtype=np.uint8)
-            frame_bgr = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-            emo_label = predict_emotion_from_frame(frame_bgr)
-            if emo_label:
-                st.session_state.current_emotion = emo_label
-                st.info(f"Emotion: {emo_label}")
-            else:
-                st.warning("No face detected.")
-
-        st.markdown("---")
-        st.subheader("3. Personalized Recommendation")
-
-        # Pick a focus topic to evaluate.
-        # In future: choose dynamically based on what the quiz tested.
-        focus_topic = "Grammar Expansion"
-
-        info = adaptive_engine.get_topic_info(
-            current_topic=focus_topic,
-            user_results=st.session_state.user_results,
-            emotion=st.session_state.current_emotion
-        )
-
-        st.write("Coach Plan:")
-        st.json(info)
-
-########################################
-# TAB 2: LEARNING PATH (display current adaptive state)
-########################################
-with tabs[1]:
-    st.header("Your Learning Path")
-
-    st.write("This reflects your latest quiz performance and current engagement mood.")
-    st.write("We adapt difficulty, CEFR level guess, and give targeted practice ideas.")
-
-    focus_topic = "Grammar Expansion"
-
-    info = adaptive_engine.get_topic_info(
-        current_topic=focus_topic,
-        user_results=st.session_state.user_results,
-        emotion=st.session_state.current_emotion
-    )
-
-    colA, colB = st.columns(2)
-    with colA:
-        st.write(f"Topic: {info['topic']}")
-        st.write(f"Estimated Mastery: {info['predicted_mastery']}")
-        st.write(f"CEFR Guess: {info['model_level']}")
-        st.write(f"Difficulty Plan: {info['base_difficulty']}")
-        st.write(f"Mood right now: {info['emotion']}")
-    with colB:
-        st.write(f"Roadmap Level: {info['roadmap_level']}")
-        st.write("Description:")
-        st.write(info["description"])
-        st.write("Examples / practice:")
-        for ex in info["examples"]:
-            st.write(f"- {ex}")
-
-    st.markdown("---")
-    st.info(info["coach_message"])
-
-########################################
-# TAB 3: CHAT TUTOR
-########################################
+# --- Chat ---
 with tabs[2]:
-    st.header("Chat With Your English Tutor")
+    msg = st.text_input("Ask your tutor:")
+    if st.button("Send"):
+        if msg.strip():
+            ans = st.session_state.tutorbot.chat(msg.strip())
+            st.write("**Tutor:**", ans)
 
-    user_msg = st.text_input("Ask about grammar, vocabulary, pronunciation, etc.")
-    if st.button("Send", key="chat_send_btn"):
-        if user_msg.strip():
-            reply = st.session_state.tutorbot.chat(user_msg.strip())
-            st.session_state.chat_history.append(("You", user_msg.strip()))
-            st.session_state.chat_history.append(("Tutor", reply))
-
-    for speaker, msg in st.session_state.chat_history:
-        if speaker == "You":
-            st.markdown(f"**You:** {msg}")
-        else:
-            st.markdown(f"**Tutor:** {msg}")
-
-########################################
-# TAB 4: SPEAK & PRACTICE
-########################################
+# --- Speak ---
 with tabs[3]:
-    st.header("Speak & Practice (Mic → Whisper → Correction → TTS)")
-    st.write("1. Record yourself speaking in English.")
-    mic_recorder_ui()
-
-    st.write("2. Paste recorded audio data below (auto-filled after Stop Recording).")
-    audio_b64 = st.text_area(
-        "Hidden audio base64 from browser recorder",
-        value="",
-        help="After you click Stop Recording, the recorder script fills this "
-             "hidden field in the DOM, but Streamlit can't read it automatically. "
-             "For now, you can manually paste from the browser console if needed."
-    )
-
-    lang_code = st.selectbox("Your spoken language?", ["en", "hi", "mr"], index=0)
-
-    if st.button("Process Speech"):
-        if audio_b64.strip():
-            # Convert base64 webm audio -> wav bytes using pydub
-            raw_bytes = base64.b64decode(audio_b64.strip())
-            audio_segment = AudioSegment.from_file(io.BytesIO(raw_bytes), format="webm")
-            wav_io = io.BytesIO()
-            audio_segment.export(wav_io, format="wav")
-            wav_bytes = wav_io.getvalue()
-
-            transcript = transcribe_file(wav_bytes, language_code=lang_code)
-            st.session_state.last_transcript = transcript
-
-            st.success("Transcript:")
-            st.write(transcript)
-
-            corrected = correct_sentence(transcript)
-            st.write("Corrected version:")
-            st.write(corrected)
-
-            # TTS the corrected sentence
-            mp3_path = synthesize_tts(corrected, lang="en")
-            with open(mp3_path, "rb") as f:
-                st.audio(f.read(), format="audio/mp3")
+    st.subheader("Speak & Practice")
+    secs = st.slider("Record seconds:", 3, 15, 5)
+    lang_in = st.selectbox("You will speak in:", ["en","hi","mr"], index=0)
+    if st.button("Record Now"):
+        wav = record_audio(secs)
+        text = transcribe_file(wav, language_code=lang_in)
+        st.write("Transcript:", text or "—")
+        if text.strip():
+            corr = correct_sentence(text)
+            st.write("Corrected:", corr)
+            tts_lang = st.selectbox("Listen in:", ["en","hi","mr"], index=0, key="tts1")
+            if corr.strip():
+                p = synthesize_tts(corr, lang=tts_lang)
+                with open(p, "rb") as f: st.audio(f.read(), format="audio/mp3")
         else:
-            st.warning("No audio captured yet. Please record first.")
+            st.warning("No speech detected. Try again closer to the mic.")
 
-########################################
-# TAB 5: GRAMMAR CHECKER
-########################################
+# --- Grammar ---
 with tabs[4]:
-    st.header("Grammar Checker (T5 fine-tuned)")
-
-    text_in = st.text_area("Write a sentence / paragraph in English:")
+    txt = st.text_area("Enter English text:")
     if st.button("Correct Grammar"):
-        if text_in.strip():
-            corrected = correct_sentence(text_in.strip())
-            diff_view = highlight_corrections(text_in.strip(), corrected)
-
-            st.subheader("Corrected Output")
-            st.write(corrected)
-
-            st.subheader("Changes (Removed [word], Added (word))")
-            st.write(diff_view)
+        if txt.strip():
+            corr = correct_sentence(txt.strip())
+            st.subheader("Corrected")
+            st.write(corr)
+            st.subheader("Changes")
+            st.write(highlight_corrections(txt.strip(), corr))
         else:
             st.warning("Please type something.")
+
+# --- Translate ---
+with tabs[5]:
+    src = st.selectbox("From", ["English","Hindi","Marathi"], index=0)
+    tgt = st.selectbox("To",   ["English","Hindi","Marathi"], index=1)
+    ttxt = st.text_area("Text:")
+    if st.button("Translate"):
+        tr = st.session_state.tutorbot.translate(ttxt, src, tgt)
+        st.subheader("Translation")
+        st.write(tr)
+        tts_lang2 = st.selectbox("Speak result in:", ["en","hi","mr"], index=0, key="tts2")
+        if tr.strip():
+            p2 = synthesize_tts(tr, lang=tts_lang2)
+            with open(p2, "rb") as f: st.audio(f.read(), format="audio/mp3")

@@ -11,6 +11,8 @@ numpy
 opencv-python
 gtts
 soundfile
+sounddevice
 openai-whisper
-pydub
-ffmpeg-python
+streamlit-webrtc
+av
+aiortc
